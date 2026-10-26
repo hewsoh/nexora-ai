@@ -13,13 +13,12 @@ import { checkRateLimit } from "@/lib/rateLimit";
 
 const MODEL = "claude-haiku-5-5";
 
-// 13 detailed weeks will not fit in 4000 tokens; a truncated response is the
-// most common cause of "malformed".
+// 13 detailed weeks will not fit in 4000 tokens; a truncated response is a
+// common cause of "malformed".
 const MAX_TOKENS = 8000;
 
 // Diagnostic switch: while true, a failure returns a short excerpt of what the
-// model actually sent so the cause is visible. Set to false once the tool is
-// confirmed working. Excerpts are capped and never include the API key.
+// model actually sent so the cause is visible. Set to false once confirmed working.
 const DEBUG = true;
 
 const SYSTEM_PROMPT = `You help someone turn a vague idea into a concrete 90-day launch plan.
@@ -30,7 +29,7 @@ Rules you must follow:
 - Use the person's stated budget and hours per week. Never plan work that exceeds their hours.
 - If the idea is unrealistic for the budget, say so plainly in the "risks" field rather than padding the plan.
 - Never invent statistics, market sizes, competitor names or customer counts. If you don't have a number, describe what they must go and find out.
-- No emoji. No markdown inside the JSON strings.
+- No emoji. No markdown inside the JSON strings. No line breaks inside string values.
 - Exactly 13 week objects, numbered 1 to 13. Keep each week to 3 tasks, each one sentence.
 - Return ONLY the JSON object described below, with no commentary before or after it.`;
 
@@ -172,9 +171,9 @@ export async function POST(request: NextRequest) {
     payload?.content?.find?.((block: { type: string }) => block.type === "text")?.text ?? "";
   const stopReason: string = payload?.stop_reason ?? "unknown";
 
-  const jsonText = extractJson(text);
-  if (!jsonText) {
-    console.error("No JSON found. stop_reason:", stopReason, "len:", text.length);
+  const candidate = extractJson(text);
+  if (!candidate) {
+    console.error("No JSON object found. stop_reason:", stopReason, "len:", text.length);
     return responseError(
       DEBUG
         ? `No JSON in the reply (stop_reason: ${stopReason}, length ${text.length}). Starts: ${text.slice(0, 200)}`
@@ -183,47 +182,59 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  try {
-    const plan = JSON.parse(jsonText);
-    return NextResponse.json({ plan });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "parse failed";
-    console.error("JSON.parse failed. stop_reason:", stopReason, message);
+  // Try the text exactly as received first. Only repair if that genuinely fails,
+  // so valid JSON is never altered.
+  const parsed = parseWithFallback(candidate);
+  if (!parsed.ok) {
+    console.error("Parse failed. stop_reason:", stopReason, parsed.error, "len:", candidate.length);
     return responseError(
       DEBUG
-        ? `Couldn't parse the JSON (stop_reason: ${stopReason}, ${message}). Tail: ${jsonText.slice(-200)}`
+        ? `Couldn't parse the JSON (stop_reason: ${stopReason}, ${parsed.error}). Head: ${candidate.slice(0, 160)}`
         : "The plan came back malformed. Try again.",
       502
     );
   }
+
+  return NextResponse.json({ plan: parsed.value });
 }
 
 function responseError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
 
-/**
- * Models sometimes wrap JSON in a fence, add a sentence before it, or emit
- * literal newlines inside strings. This normalises all three.
- */
+/** Slice from the first `{` to the last `}` — never alters what is between them. */
 function extractJson(text: string): string | null {
   const trimmed = text.trim();
-
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  let candidate = fenced?.[1]?.trim() ?? trimmed;
+  const source = fenced?.[1]?.trim() ?? trimmed;
 
-  if (!candidate.startsWith("{")) {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start !== -1 && end > start) candidate = candidate.slice(start, end + 1);
+  const start = source.indexOf("{");
+  const end = source.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+
+  return source.slice(start, end + 1);
+}
+
+type ParseResult = { ok: true; value: unknown } | { ok: false; error: string };
+
+function parseWithFallback(candidate: string): ParseResult {
+  try {
+    return { ok: true, value: JSON.parse(candidate) };
+  } catch (first) {
+    // Retry after escaping raw newlines/tabs that appear between quotes.
+    const repaired = candidate.replace(
+      /"((?:[^"\\]|\\.)*)"/g,
+      (_match, inner: string) =>
+        `"${inner.replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t")}"`
+    );
+
+    try {
+      return { ok: true, value: JSON.parse(repaired) };
+    } catch {
+      return {
+        ok: false,
+        error: first instanceof Error ? first.message : "parse failed",
+      };
+    }
   }
-
-  if (!candidate.startsWith("{")) return null;
-
-  // Repair control characters that appear inside JSON strings.
-  candidate = candidate.replace(/[\u0000-\u001F]+/g, (match) =>
-    match === "\n" ? "\\n" : match === "\t" ? "\\t" : " "
-  );
-
-  return candidate;
 }
