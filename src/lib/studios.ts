@@ -151,7 +151,7 @@ export const TIERS: Tier[] = [
   {
     id: "plus",
     name: "Plus",
-    priceAud: 150,
+    priceAud: 12.99,
     credits: 150,
     blurb: "For using NEXORA through a job hunt or a launch.",
     highlight: true,
