@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #0a0a0f;
+  color: #f4f4f7;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  /* Glassmorphic panel — one recipe, reused everywhere. */
+  .glass {
+    @apply rounded-xl2 border border-white/[0.08] bg-white/[0.04] backdrop-blur-xl;
+  }
+
+  /* Primary action. Motion is transform + opacity only, never blur or shadow. */
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-full bg-violet px-6 py-3
+           text-sm font-medium text-white transition-transform duration-200 ease-calm
+           hover:-translate-y-0.5 hover:bg-violet-soft active:translate-y-0;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center rounded-full border border-white/[0.12]
+           px-6 py-3 text-sm font-medium text-white/80 transition-colors duration-200
+           ease-calm hover:border-white/[0.24] hover:text-white;
+  }
+
+  .eyebrow {
+    @apply text-xs font-medium uppercase tracking-[0.18em] text-violet-soft;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
