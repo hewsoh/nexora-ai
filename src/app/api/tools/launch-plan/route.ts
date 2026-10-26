@@ -7,13 +7,12 @@ import { checkRateLimit } from "@/lib/rateLimit";
  * Server-side only. The API key is read from process.env on the server and is
  * never sent to the browser.
  *
- * Diagnostic build: upstream failures report the HTTP status from the AI
- * service so a misconfigured key can be told apart from a bad model name or a
- * billing problem. The upstream body is never passed on — it can contain
- * account details. Once the tool is confirmed working, tighten these messages.
+ * The model ID must be a dateless 4.6-generation-or-later ID
+ * (claude-{name}-{major}[-{minor}]). The earlier dated IDs such as
+ * claude-sonnet-4-5-20250929 are deprecated and return 404.
  */
 
-const MODEL = "claude-sonnet-4-5-20250929";
+const MODEL = "claude-haiku-5-5";
 
 const SYSTEM_PROMPT = `You help someone turn a vague idea into a concrete 90-day launch plan.
 
