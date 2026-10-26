@@ -7,12 +7,20 @@ import { checkRateLimit } from "@/lib/rateLimit";
  * Server-side only. The API key is read from process.env on the server and is
  * never sent to the browser.
  *
- * The model ID must be a dateless 4.6-generation-or-later ID
- * (claude-{name}-{major}[-{minor}]). The earlier dated IDs such as
- * claude-sonnet-4-5-20250929 are deprecated and return 404.
+ * Model IDs must use the dateless 4.6+ format (claude-{name}-{major}[-{minor}]).
+ * Earlier dated IDs such as claude-sonnet-4-5-20250929 are retired and return 404.
  */
 
 const MODEL = "claude-haiku-5-5";
+
+// 13 detailed weeks will not fit in 4000 tokens; a truncated response is the
+// most common cause of "malformed".
+const MAX_TOKENS = 8000;
+
+// Diagnostic switch: while true, a failure returns a short excerpt of what the
+// model actually sent so the cause is visible. Set to false once the tool is
+// confirmed working. Excerpts are capped and never include the API key.
+const DEBUG = true;
 
 const SYSTEM_PROMPT = `You help someone turn a vague idea into a concrete 90-day launch plan.
 
@@ -23,6 +31,7 @@ Rules you must follow:
 - If the idea is unrealistic for the budget, say so plainly in the "risks" field rather than padding the plan.
 - Never invent statistics, market sizes, competitor names or customer counts. If you don't have a number, describe what they must go and find out.
 - No emoji. No markdown inside the JSON strings.
+- Exactly 13 week objects, numbered 1 to 13. Keep each week to 3 tasks, each one sentence.
 - Return ONLY the JSON object described below, with no commentary before or after it.`;
 
 const OUTPUT_SCHEMA = `{
@@ -56,7 +65,6 @@ function clean(value: unknown, maxLength: number): string {
   return value.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, maxLength);
 }
 
-/** Turn an upstream HTTP status into something a non-developer can act on. */
 function explainUpstream(status: number): string {
   if (status === 401)
     return "The AI service rejected the key (401). Check the key was pasted in full, with no spaces.";
@@ -138,7 +146,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 4000,
+        max_tokens: MAX_TOKENS,
         system: SYSTEM_PROMPT,
         messages: [
           {
@@ -162,38 +170,60 @@ export async function POST(request: NextRequest) {
   const payload = await upstream.json();
   const text: string =
     payload?.content?.find?.((block: { type: string }) => block.type === "text")?.text ?? "";
+  const stopReason: string = payload?.stop_reason ?? "unknown";
 
   const jsonText = extractJson(text);
   if (!jsonText) {
-    console.error("Unparseable model output");
-    return responseError("The plan came back malformed. Try again.", 502);
+    console.error("No JSON found. stop_reason:", stopReason, "len:", text.length);
+    return responseError(
+      DEBUG
+        ? `No JSON in the reply (stop_reason: ${stopReason}, length ${text.length}). Starts: ${text.slice(0, 200)}`
+        : "The plan came back malformed. Try again.",
+      502
+    );
   }
 
-  let plan: unknown;
   try {
-    plan = JSON.parse(jsonText);
-  } catch {
-    console.error("JSON.parse failed");
-    return responseError("The plan came back malformed. Try again.", 502);
+    const plan = JSON.parse(jsonText);
+    return NextResponse.json({ plan });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "parse failed";
+    console.error("JSON.parse failed. stop_reason:", stopReason, message);
+    return responseError(
+      DEBUG
+        ? `Couldn't parse the JSON (stop_reason: ${stopReason}, ${message}). Tail: ${jsonText.slice(-200)}`
+        : "The plan came back malformed. Try again.",
+      502
+    );
   }
-
-  return NextResponse.json({ plan });
 }
 
 function responseError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
 
+/**
+ * Models sometimes wrap JSON in a fence, add a sentence before it, or emit
+ * literal newlines inside strings. This normalises all three.
+ */
 function extractJson(text: string): string | null {
   const trimmed = text.trim();
-  if (trimmed.startsWith("{")) return trimmed;
 
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced?.[1]) return fenced[1].trim();
+  let candidate = fenced?.[1]?.trim() ?? trimmed;
 
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start !== -1 && end > start) return trimmed.slice(start, end + 1);
+  if (!candidate.startsWith("{")) {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start !== -1 && end > start) candidate = candidate.slice(start, end + 1);
+  }
 
-  return null;
+  if (!candidate.startsWith("{")) return null;
+
+  // Repair control characters that appear inside JSON strings.
+  candidate = candidate.replace(/[\u0000-\u001F]+/g, (match) =>
+    match === "\n" ? "\\n" : match === "\t" ? "\\t" : " "
+  );
+
+  return candidate;
 }
