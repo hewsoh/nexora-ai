@@ -7,9 +7,10 @@ import { checkRateLimit } from "@/lib/rateLimit";
  * Server-side only. The API key is read from process.env on the server and is
  * never sent to the browser.
  *
- * Not tested end to end: it has never been run against a live Anthropic key
- * because no key was available in the build environment where it was written.
- * Treat the first real run as a test, not as a launch.
+ * Diagnostic build: upstream failures report the HTTP status from the AI
+ * service so a misconfigured key can be told apart from a bad model name or a
+ * billing problem. The upstream body is never passed on — it can contain
+ * account details. Once the tool is confirmed working, tighten these messages.
  */
 
 const MODEL = "claude-sonnet-4-5-20250929";
@@ -56,14 +57,37 @@ function clean(value: unknown, maxLength: number): string {
   return value.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, maxLength);
 }
 
+/** Turn an upstream HTTP status into something a non-developer can act on. */
+function explainUpstream(status: number): string {
+  if (status === 401)
+    return "The AI service rejected the key (401). Check the key was pasted in full, with no spaces.";
+  if (status === 403)
+    return "The AI service refused access (403). The key may be revoked or lack permission.";
+  if (status === 404)
+    return "The AI model name wasn't recognised (404). This is a code setting, not your key.";
+  if (status === 429)
+    return "Too many requests or no credit left on the AI account (429). Check billing.";
+  if (status === 529 || status === 503)
+    return "The AI service is overloaded right now (503). Try again in a minute.";
+  if (status === 400)
+    return "The AI service rejected the request format (400). Tell the developer this status.";
+  return `The AI service failed with status ${status}. Tell the developer this number.`;
+}
+
 export async function POST(request: NextRequest) {
   const limited = checkRateLimit(request);
   if (limited) return limited;
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    return NextResponse.json({ error: "The AI service is not configured yet." }, { status: 503 });
+  }
+
+  if (!apiKey.startsWith("sk-ant-") || apiKey.length < 40) {
     return NextResponse.json(
-      { error: "The AI service is not configured yet." },
+      {
+        error: `The saved key doesn't look like a valid Anthropic key (length ${apiKey.length}, starts "${apiKey.slice(0, 6)}"). Re-paste it in Vercel.`,
+      },
       { status: 503 }
     );
   }
@@ -81,7 +105,6 @@ export async function POST(request: NextRequest) {
   const skills = clean(body.skills, 600);
   const audience = clean(body.audience, 600);
 
-  // Input validation before any spend happens.
   if (idea.length < 20) {
     return NextResponse.json(
       { error: "Describe your idea in at least a sentence or two." },
@@ -126,21 +149,21 @@ export async function POST(request: NextRequest) {
         ],
       }),
     });
-  } catch {
+  } catch (err) {
+    console.error("fetch failed", err);
     return responseError("Couldn't reach the AI service. Try again.", 502);
   }
 
   if (!upstream.ok) {
-    // Never leak the upstream body: it can contain account details.
-    console.error("Anthropic error", upstream.status);
-    return responseError("The AI service rejected the request. Try again.", 502);
+    const detail = await upstream.text().catch(() => "");
+    console.error("Upstream error", upstream.status, detail.slice(0, 500));
+    return responseError(explainUpstream(upstream.status), 502);
   }
 
   const payload = await upstream.json();
   const text: string =
     payload?.content?.find?.((block: { type: string }) => block.type === "text")?.text ?? "";
 
-  // Models occasionally wrap JSON in fences or add a sentence before it.
   const jsonText = extractJson(text);
   if (!jsonText) {
     console.error("Unparseable model output");
@@ -151,6 +174,7 @@ export async function POST(request: NextRequest) {
   try {
     plan = JSON.parse(jsonText);
   } catch {
+    console.error("JSON.parse failed");
     return responseError("The plan came back malformed. Try again.", 502);
   }
 
